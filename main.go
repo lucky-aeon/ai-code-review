@@ -821,6 +821,8 @@ func isLikelyCode(content string) bool {
 }
 
 func test() {
+	array := [5]int{1, 2, 3, 4, 5}
+	fmt.Println(array[10])
 	fmt.Println("test")
 	fmt.Println("test2")
 }
