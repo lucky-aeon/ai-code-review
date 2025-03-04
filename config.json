@@ -1,8 +1,8 @@
 {
-    "gitlab_token": "",
-    "webhook_port": "",
-    "gitlab_host": "",
-    "api_key": "",
-    "model": "",
-    "base_url": ""
+    "github_token": "your-github-token-here",
+    "webhook_port": "9501",
+    "github_host": "https://api.github.com",
+    "api_key": "222",
+    "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "base_url": "https://api.siliconflow.cn/chat/completions"
 } 

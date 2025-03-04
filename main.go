@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -16,85 +17,133 @@ import (
 
 // Config 结构体用于存储配置信息
 type Config struct {
-	GitlabToken string `json:"gitlab_token"`
+	GithubToken string `json:"github_token"`
 	WebhookPort string `json:"webhook_port"`
-	GitlabHost  string `json:"gitlab_host"`
+	GithubHost  string `json:"github_host"`
 	APIKey      string `json:"api_key"`
 	Model       string `json:"model"`
 	BaseURL     string `json:"base_url"`
 }
 
-// MergeRequestEvent GitLab webhook事件结构
-type MergeRequestEvent struct {
-	ObjectKind string `json:"object_kind"`
-	Project    struct {
-		ID                int    `json:"id"`
-		PathWithNamespace string `json:"path_with_namespace"`
-	} `json:"project"`
-	ObjectAttributes struct {
-		ID           int    `json:"id"`
-		IID          int    `json:"iid"`
-		TargetBranch string `json:"target_branch"`
-		SourceBranch string `json:"source_branch"`
-		State        string `json:"state"`
-	} `json:"object_attributes"`
+// PullRequestEvent GitHub webhook事件结构
+type PullRequestEvent struct {
+	Action      string `json:"action"`
+	Number      int    `json:"number"`
+	PullRequest struct {
+		URL    string `json:"url"`
+		ID     int    `json:"id"`
+		Number int    `json:"number"`
+		State  string `json:"state"`
+		Title  string `json:"title"`
+		Head   struct {
+			Ref string `json:"ref"`
+			SHA string `json:"sha"`
+		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+			SHA string `json:"sha"`
+		} `json:"base"`
+	} `json:"pull_request"`
+	Repository struct {
+		ID       int    `json:"id"`
+		Name     string `json:"name"`
+		FullName string `json:"full_name"`
+		Owner    struct {
+			Login string `json:"login"`
+		} `json:"owner"`
+	} `json:"repository"`
 }
 
-// GitLabDiff 表示GitLab API返回的差异信息
-type GitLabDiff struct {
-	OldPath string `json:"old_path"`
-	NewPath string `json:"new_path"`
-	Diff    string `json:"diff"`
+// GitHubDiff 表示GitHub API返回的差异信息
+type GitHubDiff struct {
+	Filename    string `json:"filename"`
+	Status      string `json:"status"`
+	Additions   int    `json:"additions"`
+	Deletions   int    `json:"deletions"`
+	Changes     int    `json:"changes"`
+	Patch       string `json:"patch"`
+	BlobURL     string `json:"blob_url"`
+	RawURL      string `json:"raw_url"`
+	ContentsURL string `json:"contents_url"`
 }
 
 var config Config
 
 func main() {
-	// 读取配置文件
-	configData, err := ioutil.ReadFile("config.json")
+	// 加载配置
+	configFile, err := os.Open("config.json")
 	if err != nil {
-		log.Fatal("Error reading config file:", err)
+		log.Fatalf("无法打开配置文件: %v", err)
+	}
+	defer configFile.Close()
+
+	if err := json.NewDecoder(configFile).Decode(&config); err != nil {
+		log.Fatalf("解析配置文件失败: %v", err)
 	}
 
-	if err := json.Unmarshal(configData, &config); err != nil {
-		log.Fatal("Error parsing config:", err)
+	// 设置默认值
+	if config.WebhookPort == "" {
+		config.WebhookPort = "8080"
+	}
+	if config.GithubHost == "" {
+		config.GithubHost = "https://api.github.com"
+	}
+	if config.Model == "" {
+		config.Model = "gpt-4"
 	}
 
-	// 设置webhook处理路由
+	// 验证必需的配置
+	if config.GithubToken == "" {
+		log.Fatal("缺少必需的配置: github_token")
+	}
+	if config.APIKey == "" {
+		log.Fatal("缺少必需的配置: api_key")
+	}
+
 	http.HandleFunc("/webhook", handleWebhook)
 
-	fmt.Printf("Starting webhook server on port %s...\n", config.WebhookPort)
+	log.Printf("🚀 GitHub代码审查机器人启动在端口 %s", config.WebhookPort)
 	log.Fatal(http.ListenAndServe(":"+config.WebhookPort, nil))
 }
 
 func handleWebhook(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+	// 限制请求体大小
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 
-	// 读取请求体
 	body, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Error reading request body", http.StatusInternalServerError)
 		return
 	}
 
-	// 解析webhook事件
-	var event MergeRequestEvent
-	if err := json.Unmarshal(body, &event); err != nil {
-		http.Error(w, "Error parsing webhook payload", http.StatusBadRequest)
+	// 验证请求头
+	event := r.Header.Get("X-GitHub-Event")
+	if event == "" {
+		http.Error(w, "Missing X-GitHub-Event header", http.StatusBadRequest)
 		return
 	}
 
-	// 只处理merge request事件，且必须是开放状态的
-	if event.ObjectKind != "merge_request" || event.ObjectAttributes.State != "opened" {
+	// 只处理pull request事件
+	if event != "pull_request" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	// 异步处理代码评审
-	go handleCodeReview(event)
+	// 解析webhook事件
+	var prEvent PullRequestEvent
+	if err := json.Unmarshal(body, &prEvent); err != nil {
+		http.Error(w, "Error parsing webhook payload", http.StatusBadRequest)
+		return
+	}
+
+	// 只处理pull request事件，且必须是opened或synchronize状态
+	if prEvent.Action != "opened" && prEvent.Action != "synchronize" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// 启动代码评审流程
+	go handleCodeReview(prEvent)
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -110,9 +159,9 @@ type Comment struct {
 	Content string
 }
 
-func handleCodeReview(event MergeRequestEvent) {
+func handleCodeReview(event PullRequestEvent) {
 	log.Printf("🚀 开始评审 MR !%d 在项目 %s",
-		event.ObjectAttributes.IID, event.Project.PathWithNamespace)
+		event.PullRequest.Number, event.Repository.FullName)
 
 	// 获取MR的变更
 	changes, err := getMRChanges(event)
@@ -130,24 +179,24 @@ func handleCodeReview(event MergeRequestEvent) {
 	for _, change := range changes {
 		comments, err := reviewFileChange(change)
 		if err != nil {
-			log.Printf("❌ 评审文件 %s 失败: %v", change.NewPath, err)
+			log.Printf("❌ 评审文件 %s 失败: %v", change.Filename, err)
 			continue
 		}
 
 		if len(comments) > 0 {
 			reviewedFiles++
 			commentCount += len(comments)
-			log.Printf("🔍 在 %s 中发现 %d 个问题", change.NewPath, len(comments))
+			log.Printf("🔍 在 %s 中发现 %d 个问题", change.Filename, len(comments))
 		} else {
-			log.Printf("✅ 文件 %s 未发现问题", change.NewPath)
+			log.Printf("✅ 文件 %s 未发现问题", change.Filename)
 		}
 
 		// 对每个评论创建单独的note
 		for _, comment := range comments {
 			if err := createNote(event, change, comment); err != nil {
-				log.Printf("❌ 创建评论失败 %s 行 %d: %v", change.NewPath, comment.Line, err)
+				log.Printf("❌ 创建评论失败 %s 行 %d: %v", change.Filename, comment.Line, err)
 			} else {
-				log.Printf("💬 已在 %s 行 %d 创建评论", change.NewPath, comment.Line)
+				log.Printf("💬 已在 %s 行 %d 创建评论", change.Filename, comment.Line)
 			}
 		}
 	}
@@ -156,19 +205,21 @@ func handleCodeReview(event MergeRequestEvent) {
 		reviewedFiles, commentCount)
 }
 
-func getMRChanges(event MergeRequestEvent) ([]GitLabDiff, error) {
-	// 添加更多查询参数以获取完整的diff信息
-	url := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests/%d/changes?access_raw_diffs=true",
-		config.GitlabHost,
-		event.Project.ID,
-		event.ObjectAttributes.IID)
+func getMRChanges(event PullRequestEvent) ([]GitHubDiff, error) {
+	// 构建GitHub API URL，获取Pull Request的文件变更
+	url := fmt.Sprintf("%s/repos/%s/pulls/%d/files",
+		config.GithubHost,
+		event.Repository.FullName,
+		event.PullRequest.Number)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	req.Header.Set("PRIVATE-TOKEN", config.GitlabToken)
+	// 设置GitHub API认证头
+	req.Header.Set("Authorization", fmt.Sprintf("token %s", config.GithubToken))
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -176,48 +227,56 @@ func getMRChanges(event MergeRequestEvent) ([]GitLabDiff, error) {
 	}
 	defer resp.Body.Close()
 
-	var result struct {
-		Changes []GitLabDiff `json:"changes"`
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return nil, fmt.Errorf("GitHub API错误 %d: %s", resp.StatusCode, string(body))
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	// 直接解析GitHub API返回的文件列表
+	var files []GitHubDiff
+	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
 		return nil, err
 	}
 
-	return result.Changes, nil
+	return files, nil
 }
 
-func reviewFileChange(change GitLabDiff) ([]Comment, error) {
-	log.Printf("🔍 正在评审文件: %s", change.NewPath)
-	log.Printf("📄 代码片段预览:\n%s", getPreviewDiff(change.Diff))
+func reviewFileChange(change GitHubDiff) ([]Comment, error) {
+	log.Printf("🔍 正在评审文件: %s", change.Filename)
+	log.Printf("📄 代码片段预览:\n%s", getPreviewDiff(change.Patch))
 
 	// 获取文件语言类型
-	language := getLanguageFromPath(change.NewPath)
+	language := getLanguageFromPath(change.Filename)
 
-	// 修改提示词，要求返回JSON格式
-	prompt := fmt.Sprintf(`# 代码评审专家
+	// 修改提示词，使用简单分隔符格式
+	prompt := fmt.Sprintf(`# 代码审查专家
 
-## 要求
+## 审查要求
 
-- 请仔细分析并审查以下代码文件，识别潜在的问题。
-- 评审时，关注代码的性能、可读性、可维护性、安全性、逻辑错误等方面。
-- 针对每个问题，请提供具体的行号、问题描述以及解决方案。
-- 请注意，解决方案应是针对问题的具体修正建议，不要仅提供抽象的建议。
-- 请确保返回的格式严格按照以下 JSON 格式：
-  json
-  {
-    "comments": [
-      {
-        "line": 行号,
-        "problem": "问题描述",
-        "solution": "解决方案"
-      }
-    ]
-  }
+- 请对以下代码文件进行详细且全面的审查，识别并分析潜在的编码问题。
+- 审查过程中，您需要关注以下方面，并给予详细反馈：
+  - **逻辑错误**：检查代码中可能存在的逻辑漏洞或错误的实现，确保代码行为符合预期。
+  - **编程规范和最佳实践**：查找违反行业标准的部分，如不合适的命名、不清晰的函数设计或不合理的代码结构。关注代码是否符合目标编程语言的社区标准。
+  - **可维护性**：分析代码是否易于后续的维护、扩展与修改，是否有冗余代码、重复逻辑等。
+  - **可读性**：确保代码结构清晰、命名规范，易于理解和调试。注释是否足够清晰、完整。
+  - **性能**：检查是否有明显的性能瓶颈或不必要的复杂度，例如低效的算法、重复的计算等。
+  - **安全性**：检查是否存在可能的安全漏洞，例如 SQL 注入、跨站脚本攻击（XSS）、敏感数据泄露等问题。
+- 请避免关注代码的格式、空格以及代码风格（如缩进、空行等）。
+- 对数据库相关问题（如迁移、表结构设计、索引、唯一性约束等）不做评审，这些内容不需要识别。
+- 对于每个问题，请提供具体的行号、问题描述以及详细的解决方案。建议提供修改后的代码示例或进一步的优化建议。
+- 请在审查时考虑到代码的可扩展性与团队协作，确保审查结果对团队长期开发有帮助。
+- 请确保评审语言为中文，且清晰表达审查结果。
+- 输出时请严格按照以下格式，每行一个问题：
+  ISSUE|行号|问题描述|解决方案
+  例如：
+  ISSUE|42|这里变量命名不清晰|建议将变量改为更具描述性的名称
+  
+  如果没有发现问题，请输出：NOISSUES
+
 ## 语言: %s
 ## 文件: %s
 ## 代码:
-%s`, language, change.NewPath, change.Diff)
+%s`, language, change.Filename, change.Patch)
 
 	aiResp, err := callAI(prompt)
 	if err != nil {
@@ -227,12 +286,12 @@ func reviewFileChange(change GitLabDiff) ([]Comment, error) {
 	log.Printf("🤖 AI响应: %s", aiResp)
 
 	// 解析AI响应获取评论
-	comments := parseAIResponseJSON(aiResp, change.Diff)
+	comments := parseAIResponseJSON(aiResp, change.Patch)
 	log.Printf("📋 解析得到评论: %+v", comments)
 
 	// 仅校验行号的有效性
 	var validComments []Comment
-	diffLines := strings.Split(change.Diff, "\n")
+	diffLines := strings.Split(change.Patch, "\n")
 	lineRanges := parseLineRanges(diffLines)
 
 	for _, comment := range comments {
@@ -340,45 +399,42 @@ func extractLineContent(diff string, lineNum int) string {
 	return "[找不到该行代码]"
 }
 
-// parseAIResponseJSON 尝试解析AI响应为JSON格式
+// 修改解析函数以处理新的简单分隔符格式
 func parseAIResponseJSON(aiResp string, diff string) []Comment {
-	// 清理响应，提取JSON部分
-	jsonStart := strings.Index(aiResp, "{")
-	jsonEnd := strings.LastIndex(aiResp, "}")
-
-	if jsonStart >= 0 && jsonEnd >= 0 && jsonEnd > jsonStart {
-		aiResp = aiResp[jsonStart : jsonEnd+1]
-	}
-
-	// 尝试解析JSON
-	var result struct {
-		Comments []struct {
-			Line     int    `json:"line"`
-			Problem  string `json:"problem"`
-			Solution string `json:"solution"`
-		} `json:"comments"`
-	}
-
-	err := json.Unmarshal([]byte(aiResp), &result)
-	if err != nil {
-		log.Printf("❌ 解析JSON失败: %v，尝试备用解析", err)
-		return parseAIResponseFallback(aiResp, diff)
-	}
-
 	var comments []Comment
-	for _, c := range result.Comments {
-		comment := Comment{
-			Line:    c.Line,
-			Content: fmt.Sprintf("%s|%s", c.Problem, c.Solution),
+
+	lines := strings.Split(aiResp, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "ISSUE|") {
+			parts := strings.Split(line, "|")
+			if len(parts) >= 4 {
+				lineNum, err := strconv.Atoi(parts[1])
+				if err != nil {
+					log.Printf("❌ 无效的行号: %s", parts[1])
+					continue
+				}
+
+				problem := strings.TrimSpace(parts[2])
+				solution := strings.TrimSpace(parts[3])
+
+				comment := Comment{
+					Line:    lineNum,
+					Content: fmt.Sprintf("%s|%s", problem, solution),
+				}
+				comments = append(comments, comment)
+				log.Printf("  🔹 解析评论 - 行 %d: %s|%s", lineNum, problem, solution)
+			}
+		} else if line == "NOISSUES" {
+			log.Printf("✅ 未发现问题")
+			return comments
 		}
-		comments = append(comments, comment)
-		log.Printf("  🔹 从JSON解析评论 - 行 %d: %s|%s", c.Line, c.Problem, c.Solution)
 	}
 
 	return comments
 }
 
-// parseAIResponseFallback 在JSON解析失败时的备用解析方法
+// 备用解析函数也使用相同逻辑，以兼容旧格式的响应
 func parseAIResponseFallback(aiResp string, diff string) []Comment {
 	var comments []Comment
 
@@ -392,6 +448,30 @@ func parseAIResponseFallback(aiResp string, diff string) []Comment {
 			continue
 		}
 
+		// 首先尝试解析 ISSUE| 格式
+		if strings.HasPrefix(line, "ISSUE|") {
+			parts := strings.Split(line, "|")
+			if len(parts) >= 4 {
+				lineNum, err := strconv.Atoi(parts[1])
+				if err != nil {
+					continue
+				}
+
+				problem := strings.TrimSpace(parts[2])
+				solution := strings.TrimSpace(parts[3])
+
+				comment := Comment{
+					Line:    lineNum,
+					Content: fmt.Sprintf("%s|%s", problem, solution),
+				}
+
+				comments = append(comments, comment)
+				log.Printf("  🔹 从备用解析评论 - 行 %d: %s", lineNum, problem)
+				continue
+			}
+		}
+
+		// 然后尝试其他常见格式
 		matches := linePattern.FindStringSubmatch(line)
 		if len(matches) >= 3 {
 			lineNum, err := strconv.Atoi(matches[1])
@@ -418,9 +498,9 @@ func parseAIResponseFallback(aiResp string, diff string) []Comment {
 	return comments
 }
 
-// 4. 改进AI调用函数，更好地处理各种响应格式
+// 更新 callAI 函数，加入完整实现
 func callAI(prompt string) (string, error) {
-	// 准备请求体
+	// 准备请求体，不再添加 JSON 格式指导
 	requestBody := map[string]interface{}{
 		"model":    config.Model,
 		"messages": []map[string]string{{"role": "user", "content": prompt}},
@@ -443,7 +523,7 @@ func callAI(prompt string) (string, error) {
 
 	// 发送请求
 	client := &http.Client{
-		Timeout: 60 * time.Second,
+		Timeout: 60 * time.Second, // 需要重新导入time包
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -492,76 +572,42 @@ func callAI(prompt string) (string, error) {
 	return responseText, nil
 }
 
-func createNote(event MergeRequestEvent, change GitLabDiff, comment Comment) error {
-	// 提取代码行内容
-	codeContent := extractLineContent(change.Diff, comment.Line)
-	codeBlock := ""
-	if codeContent != "[找不到该行代码]" {
-		codeBlock = fmt.Sprintf("```\n%s\n```", codeContent)
-	}
-
+func createNote(event PullRequestEvent, change GitHubDiff, comment Comment) error {
 	// 格式化问题和解决方案
 	parts := strings.Split(comment.Content, "|")
-	formattedComment := ""
-
+	var formattedNote string
 	if len(parts) >= 2 {
 		problem := strings.TrimSpace(parts[0])
 		solution := strings.TrimSpace(parts[1])
-		formattedComment = fmt.Sprintf("**问题**: %s\n\n**优化**: %s", problem, solution)
+		formattedNote = fmt.Sprintf("**问题**: %s\n\n**建议**: %s", problem, solution)
 	} else {
-		formattedComment = fmt.Sprintf("**问题**: %s", comment.Content)
+		formattedNote = comment.Content
 	}
 
-	// 完整评论内容
-	fullComment := fmt.Sprintf("%s\n\n**代码行**: \n%s", formattedComment, codeBlock)
-
-	// 获取MR的提交信息
-	base_sha, head_sha, err := getMRCommitInfo(event)
+	// 获取PR的提交SHA
+	_, headSHA, err := getMRCommitInfo(event)
 	if err != nil {
-		log.Printf("⚠️ 无法获取MR提交信息: %v, 使用默认值", err)
-		base_sha = "HEAD~"
-		head_sha = "HEAD"
+		return fmt.Errorf("无法获取PR提交信息: %v", err)
 	}
 
-	log.Printf("MR提交信息: base_sha=%s, head_sha=%s", base_sha, head_sha)
+	// 准备请求体 - 创建单个评论
+	url := fmt.Sprintf("%s/repos/%s/pulls/%d/comments",
+		config.GithubHost,
+		event.Repository.FullName,
+		event.PullRequest.Number)
 
-	// 准备请求体
-	url := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests/%d/discussions",
-		config.GitlabHost,
-		event.Project.ID,
-		event.ObjectAttributes.IID)
-
-	// 构建position参数 - 使用text类型而不是提供line_code
-	position := map[string]interface{}{
-		"base_sha":      base_sha,
-		"start_sha":     base_sha, // 使用相同的base_sha
-		"head_sha":      head_sha,
-		"position_type": "text",
-		"new_path":      change.NewPath,
-		"new_line":      comment.Line,
+	// 构建评论请求
+	reviewPayload := map[string]interface{}{
+		"commit_id": headSHA,
+		"path":      change.Filename,
+		"body":      formattedNote,
+		"position":  getDiffPosition(change.Patch, comment.Line),
 	}
 
-	// 如果不是新文件，设置old_path和old_line
-	if change.OldPath != "/dev/null" {
-		position["old_path"] = change.NewPath
-		// 对于修改的文件，旧行号可以与新行号相同
-		// 对于添加的行，不设置old_line
-		if !isAddedLine(change.Diff, comment.Line) {
-			position["old_line"] = comment.Line
-		}
-	}
-
-	payload := map[string]interface{}{
-		"body":     fullComment,
-		"position": position,
-	}
-
-	payloadBytes, err := json.Marshal(payload)
+	payloadBytes, err := json.Marshal(reviewPayload)
 	if err != nil {
 		return err
 	}
-
-	log.Printf("Creating discussion with payload: %s", string(payloadBytes))
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(payloadBytes))
 	if err != nil {
@@ -569,7 +615,8 @@ func createNote(event MergeRequestEvent, change GitLabDiff, comment Comment) err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("PRIVATE-TOKEN", config.GitlabToken)
+	req.Header.Set("Authorization", fmt.Sprintf("token %s", config.GithubToken))
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -577,56 +624,87 @@ func createNote(event MergeRequestEvent, change GitLabDiff, comment Comment) err
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := ioutil.ReadAll(resp.Body)
-	log.Printf("Response status: %d, body: %s", resp.StatusCode, string(respBody))
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("API返回非成功状态码: %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return fmt.Errorf("GitHub API错误 %d: %s", resp.StatusCode, string(body))
 	}
 
 	return nil
 }
 
-// 获取MR的提交信息
-func getMRCommitInfo(event MergeRequestEvent) (string, string, error) {
-	url := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests/%d/versions",
-		config.GitlabHost,
-		event.Project.ID,
-		event.ObjectAttributes.IID)
+// getDiffPosition 计算GitHub差异中的位置
+func getDiffPosition(patch string, newLine int) int {
+	// GitHub的position是在差异中的行号，而不是文件中的行号
+	// 需要计算从patch开始的第几行
+	lines := strings.Split(patch, "\n")
+	position := 0
+	currentLine := 0
 
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "", "", err
+	for i, line := range lines {
+		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			currentLine++
+			if currentLine == newLine {
+				position = i + 1 // GitHub position是1-indexed
+				break
+			}
+		} else if !strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+			currentLine++
+		}
 	}
 
-	req.Header.Set("PRIVATE-TOKEN", config.GitlabToken)
+	return position
+}
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", "", err
+// getPRCommitInfo 获取PR的提交信息
+func getMRCommitInfo(event PullRequestEvent) (string, string, error) {
+	// 使用Pull Request的head.sha作为head提交SHA
+	headSHA := event.PullRequest.Head.SHA
+	baseSHA := event.PullRequest.Base.SHA
+
+	// 如果SHA为空，则通过API获取
+	if headSHA == "" || baseSHA == "" {
+		url := fmt.Sprintf("%s/repos/%s/pulls/%d",
+			config.GithubHost,
+			event.Repository.FullName,
+			event.PullRequest.Number)
+
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return "", "", err
+		}
+
+		req.Header.Set("Authorization", fmt.Sprintf("token %s", config.GithubToken))
+		req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return "", "", err
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := ioutil.ReadAll(resp.Body)
+			return "", "", fmt.Errorf("GitHub API错误 %d: %s", resp.StatusCode, string(body))
+		}
+
+		var pr struct {
+			Head struct {
+				SHA string `json:"sha"`
+			} `json:"head"`
+			Base struct {
+				SHA string `json:"sha"`
+			} `json:"base"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+			return "", "", err
+		}
+
+		headSHA = pr.Head.SHA
+		baseSHA = pr.Base.SHA
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("获取MR版本信息失败，状态码: %d", resp.StatusCode)
-	}
-
-	var versions []struct {
-		HeadCommitSHA string `json:"head_commit_sha"`
-		BaseCommitSHA string `json:"base_commit_sha"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&versions); err != nil {
-		return "", "", err
-	}
-
-	if len(versions) == 0 {
-		return "", "", fmt.Errorf("未找到MR版本信息")
-	}
-
-	// 使用最新版本的提交SHA
-	latestVersion := versions[0]
-	return latestVersion.BaseCommitSHA, latestVersion.HeadCommitSHA, nil
+	return baseSHA, headSHA, nil
 }
 
 // 检查指定行是否是新增行
