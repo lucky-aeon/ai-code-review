@@ -922,17 +922,6 @@ func test() {
 	array := [5]int{1, 2, 3, 4, 5}
 
 	// 正确的数组访问
-	fmt.Println("访问有效索引:", array[4])
+	fmt.Println("访问有效索引:", array[10])
 
-	// 错误的数组访问 - 会导致运行时错误
-	// 注释掉以避免程序崩溃，但保留以展示问题
-	// fmt.Println(array[10]) // 索引越界: 数组长度为5，有效索引为0-4
-
-	// 安全访问示例
-	index := 10
-	if index < len(array) {
-		fmt.Println(array[index])
-	} else {
-		fmt.Println("索引", index, "超出范围，数组长度为", len(array))
-	}
 }
