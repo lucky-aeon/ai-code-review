@@ -822,4 +822,5 @@ func isLikelyCode(content string) bool {
 
 func test() {
 	fmt.Println("test")
+	fmt.Println("test2")
 }
