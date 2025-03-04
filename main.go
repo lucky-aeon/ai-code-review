@@ -819,3 +819,7 @@ func isLikelyCode(content string) bool {
 
 	return false
 }
+
+func test() {
+	fmt.Println("test")
+}
