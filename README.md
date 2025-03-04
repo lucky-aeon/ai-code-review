@@ -1,57 +1,78 @@
-# GitHub AI 代码审查机器人
+# Bot Code Review
 
-这是一个基于 GitHub API 的 AI 代码审查机器人，可以自动对 Pull Request 中的代码变更进行审查并提供针对性的评论。
+这是一个GitHub PR代码评审机器人，使用AI技术自动检查代码问题并添加评论。
 
-## 功能
+## 功能特点
 
-- 监听 GitHub Pull Request Webhook 事件
-- 获取 PR 中的代码变更
-- 使用 AI 模型对代码变更进行智能评审
-- 在 PR 的具体代码行上添加详细的审查评论
-- 支持多种编程语言
+- 通过GitHub Webhook监听Pull Request事件
+- 使用AI模型分析代码变更，发现潜在问题
+- 自动添加行内评论到Pull Request
+- 支持多种编程语言的代码审查
+- 特别关注数组越界、变量重复声明等常见问题
 
-## 安装
-
-1. 克隆仓库
-   ```
-   git clone <repository-url>
-   cd <repository-directory>
-   ```
-
-2. 复制配置文件模板
-   ```
-   cp config.json.example config.json
-   ```
-
-3. 编辑配置文件 `config.json`，填入以下信息:
-   - `github_token`: GitHub 个人访问令牌，需要有 PR 读写权限
-   - `webhook_port`: Webhook 服务监听端口
-   - `github_host`: GitHub API 地址，一般是 "https://api.github.com"
-   - `api_key`: AI 服务的 API 密钥
-   - `model`: 使用的 AI 模型名称
-   - `base_url`: AI API 的基础 URL
-
-## 运行
+## 项目结构
 
 ```
+.
+├── config/          # 配置相关代码
+│   └── config.go    # 配置结构和加载函数
+├── github/          # GitHub API相关代码
+│   └── api.go       # GitHub API调用函数
+├── handlers/        # 请求处理相关代码
+│   ├── reviewer.go  # 代码审查逻辑
+│   └── webhook.go   # Webhook处理函数
+├── models/          # 数据模型
+│   └── models.go    # 请求和响应结构体
+├── utils/           # 工具函数
+│   ├── ai.go        # AI调用和结果解析
+│   └── diff.go      # 差异分析工具
+├── config.json      # 配置文件（需要自行创建）
+├── go.mod           # Go模块定义
+└── main.go          # 主程序入口
+```
+
+## 配置文件
+
+创建`config.json`文件，格式如下：
+
+```json
+{
+  "github_token": "your_github_personal_access_token",
+  "webhook_port": "8080",
+  "github_host": "https://api.github.com",
+  "api_key": "your_ai_api_key",
+  "model": "your_ai_model",
+  "base_url": "your_ai_api_endpoint"
+}
+```
+
+## 如何使用
+
+1. 克隆仓库
+```bash
+git clone https://github.com/yourusername/bot-code-review.git
+cd bot-code-review
+```
+
+2. 创建配置文件
+
+3. 启动服务
+```bash
 go run main.go
 ```
 
-## 配置 GitHub Webhook
+4. 在GitHub仓库中配置Webhook
+   - Webhook URL: `http://your-server-address:8080/webhook`
+   - 事件类型: 选择 "Pull requests"
 
-1. 在 GitHub 仓库中进入 Settings > Webhooks > Add webhook
-2. 设置 Payload URL 为您的服务器地址，例如 `http://your-server.com:8080/webhook`
-3. 选择 Content type 为 `application/json`
-4. 在 "Which events would you like to trigger this webhook?" 部分选择 "Let me select individual events"，然后勾选 "Pull requests"
-5. 点击 "Add webhook" 完成配置
+## 测试模式
 
-## 工作流程
+设置环境变量`TEST_MODE=true`来启动测试模式：
 
-1. 当用户创建或更新 Pull Request 时，GitHub 发送 webhook 事件到您的服务器
-2. 服务器接收事件并获取 PR 中的文件变更
-3. AI 模型分析代码变更并生成评审意见
-4. 机器人将评审意见以评论形式发布在 PR 的具体代码行上
+```bash
+TEST_MODE=true go run main.go
+```
 
-## 许可
+## 依赖项
 
-[MIT License](LICENSE) 
+- Go 1.17+ 
