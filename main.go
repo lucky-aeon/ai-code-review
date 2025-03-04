@@ -255,21 +255,22 @@ func reviewFileChange(change GitHubDiff) ([]Comment, error) {
 
 - 请对以下代码文件进行详细且全面的审查，识别并分析潜在的编码问题。
 - 审查过程中，您需要关注以下方面，并给予详细反馈：
-  - **逻辑错误**：检查代码中可能存在的逻辑漏洞或错误的实现，确保代码行为符合预期。
+  - **逻辑错误**：检查代码中可能存在的逻辑漏洞或错误的实现，如数组越界访问、空指针引用等，确保代码行为符合预期。
   - **编程规范和最佳实践**：查找违反行业标准的部分，如不合适的命名、不清晰的函数设计或不合理的代码结构。关注代码是否符合目标编程语言的社区标准。
   - **可维护性**：分析代码是否易于后续的维护、扩展与修改，是否有冗余代码、重复逻辑等。
   - **可读性**：确保代码结构清晰、命名规范，易于理解和调试。注释是否足够清晰、完整。
   - **性能**：检查是否有明显的性能瓶颈或不必要的复杂度，例如低效的算法、重复的计算等。
   - **安全性**：检查是否存在可能的安全漏洞，例如 SQL 注入、跨站脚本攻击（XSS）、敏感数据泄露等问题。
 - 请避免关注代码的格式、空格以及代码风格（如缩进、空行等）。
-- 对数据库相关问题（如迁移、表结构设计、索引、唯一性约束等）不做评审，这些内容不需要识别。
-- 对于每个问题，请提供具体的行号、问题描述以及详细的解决方案。建议提供修改后的代码示例或进一步的优化建议。
-- 请在审查时考虑到代码的可扩展性与团队协作，确保审查结果对团队长期开发有帮助。
+- 对每个发现的问题，必须标明具体的行号并提供明确的问题描述和解决方案建议。
 - 请确保评审语言为中文，且清晰表达审查结果。
+- 对于行号，请确保使用代码差异中的新文件行号（"+"号后面的代码行）。
 - 输出时请严格按照以下格式，每行一个问题：
+
   ISSUE|行号|问题描述|解决方案
-  例如：
-  ISSUE|42|这里变量命名不清晰|建议将变量改为更具描述性的名称
+
+  如：
+  ISSUE|24|数组索引越界访问可能导致运行时错误|建议对数组索引进行检查，确保索引在有效范围内。
   
   如果没有发现问题，请输出：NOISSUES
 
@@ -313,7 +314,9 @@ func parseLineRanges(diffLines []string) []struct{ Start, End int } {
 	currentLine := 0
 	inHeader := true
 
-	for _, line := range diffLines {
+	log.Printf("📊 解析diff行范围，共 %d 行", len(diffLines))
+
+	for i, line := range diffLines {
 		if inHeader && strings.HasPrefix(line, "@@") {
 			// 解析diff头部获取起始行号
 			re := regexp.MustCompile(`@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
@@ -322,28 +325,46 @@ func parseLineRanges(diffLines []string) []struct{ Start, End int } {
 				start, _ := strconv.Atoi(matches[1])
 				currentLine = start - 1 // 减1是因为下面会先增加
 				inHeader = false
+				log.Printf("📍 找到diff头部行 %d: %s, 新文件起始行: %d", i, line, start)
 			}
 			continue
 		}
 
+		// 处理diff行缺失的问题
+		if line == "" && !inHeader {
+			continue
+		}
+
 		if !inHeader {
-			if strings.HasPrefix(line, "+") {
+			if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
 				// 新增行
 				currentLine++
+				log.Printf("➕ 行 %d: %s, 当前行号: %d", i, line[:min(30, len(line))], currentLine)
+
 				// 如果当前没有正在处理的范围，或者最后一个范围已经结束，添加新范围
 				if len(ranges) == 0 || ranges[len(ranges)-1].End < currentLine-1 {
 					ranges = append(ranges, struct{ Start, End int }{Start: currentLine, End: currentLine})
+					log.Printf("📌 创建新范围: [%d, %d]", currentLine, currentLine)
 				} else {
 					// 否则，扩展最后一个范围
 					ranges[len(ranges)-1].End = currentLine
+					log.Printf("📏 扩展范围到: [%d, %d]", ranges[len(ranges)-1].Start, currentLine)
 				}
 			} else if !strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "\\") {
 				// 上下文行
 				if strings.HasPrefix(line, " ") {
 					currentLine++
+					log.Printf("◻️ 行 %d: %s, 当前行号: %d (上下文行)", i, line[:min(30, len(line))], currentLine)
 				}
+			} else {
+				log.Printf("➖ 行 %d: %s (删除行或其他)", i, line[:min(30, len(line))])
 			}
 		}
+	}
+
+	log.Printf("📊 解析完成，共找到 %d 个行范围", len(ranges))
+	for i, r := range ranges {
+		log.Printf("  📍 范围 %d: [%d, %d]", i+1, r.Start, r.End)
 	}
 
 	return ranges
@@ -399,35 +420,57 @@ func extractLineContent(diff string, lineNum int) string {
 	return "[找不到该行代码]"
 }
 
-// 修改解析函数以处理新的简单分隔符格式
-func parseAIResponseJSON(aiResp string, diff string) []Comment {
+// parseAIResponseJSON 解析AI的响应并提取评论
+func parseAIResponseJSON(resp string, diff string) []Comment {
 	var comments []Comment
+	lines := strings.Split(resp, "\n")
 
-	lines := strings.Split(aiResp, "\n")
+	log.Printf("🔍 解析AI响应，共 %d 行", len(lines))
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		log.Printf("📝 处理行: %s", line)
+
+		if line == "NOISSUES" {
+			log.Printf("✅ AI未发现问题")
+			return comments
+		}
+
 		if strings.HasPrefix(line, "ISSUE|") {
 			parts := strings.Split(line, "|")
 			if len(parts) >= 4 {
-				lineNum, err := strconv.Atoi(parts[1])
+				lineNumStr := parts[1]
+				problem := parts[2]
+				solution := parts[3]
+
+				log.Printf("🔹 解析行号: %s, 问题: %s, 解决方案: %s", lineNumStr, problem, solution)
+
+				lineNum, err := strconv.Atoi(lineNumStr)
 				if err != nil {
-					log.Printf("❌ 无效的行号: %s", parts[1])
+					log.Printf("❌ 无效的行号: %s", lineNumStr)
 					continue
 				}
 
-				problem := strings.TrimSpace(parts[2])
-				solution := strings.TrimSpace(parts[3])
-
-				comment := Comment{
-					Line:    lineNum,
-					Content: fmt.Sprintf("%s|%s", problem, solution),
+				// 确认这是一个被修改的行，才添加评论
+				if isAddedLine(diff, lineNum) {
+					comment := Comment{
+						Line:    lineNum,
+						Content: fmt.Sprintf("问题: %s | 建议: %s", problem, solution),
+					}
+					comments = append(comments, comment)
+					log.Printf("✅ 添加评论到行 %d", lineNum)
+				} else {
+					log.Printf("❌ 行 %d 不是修改行，跳过", lineNum)
 				}
-				comments = append(comments, comment)
-				log.Printf("  🔹 解析评论 - 行 %d: %s|%s", lineNum, problem, solution)
+			} else {
+				log.Printf("❌ 无效的ISSUE格式: %s, 部分数: %d", line, len(parts))
 			}
-		} else if line == "NOISSUES" {
-			log.Printf("✅ 未发现问题")
-			return comments
+		} else if !strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "```") {
+			log.Printf("⚠️ 忽略未知格式行: %s", line)
 		}
 	}
 
@@ -573,16 +616,24 @@ func callAI(prompt string) (string, error) {
 }
 
 func createNote(event PullRequestEvent, change GitHubDiff, comment Comment) error {
-	// 格式化问题和解决方案
-	parts := strings.Split(comment.Content, "|")
-	var formattedNote string
-	if len(parts) >= 2 {
-		problem := strings.TrimSpace(parts[0])
-		solution := strings.TrimSpace(parts[1])
-		formattedNote = fmt.Sprintf("**问题**: %s\n\n**建议**: %s", problem, solution)
+	// 格式化评论内容为Markdown格式
+	formattedNote := ""
+	if strings.Contains(comment.Content, "|") {
+		parts := strings.Split(comment.Content, "|")
+		if len(parts) >= 2 {
+			problem := strings.TrimSpace(parts[0])
+			solution := strings.TrimSpace(parts[1])
+			formattedNote = fmt.Sprintf("**%s**\n\n%s", problem, solution)
+		} else {
+			formattedNote = comment.Content
+		}
 	} else {
 		formattedNote = comment.Content
 	}
+
+	// 确保评论格式正确
+	formattedNote = strings.ReplaceAll(formattedNote, "问题:", "**问题:**")
+	formattedNote = strings.ReplaceAll(formattedNote, "建议:", "**建议:**")
 
 	// 获取PR的提交SHA
 	_, headSHA, err := getMRCommitInfo(event)
@@ -634,25 +685,53 @@ func createNote(event PullRequestEvent, change GitHubDiff, comment Comment) erro
 
 // getDiffPosition 计算GitHub差异中的位置
 func getDiffPosition(patch string, newLine int) int {
-	// GitHub的position是在差异中的行号，而不是文件中的行号
+	// GitHub的position是在差异中的行号（从1开始），而不是文件中的行号
 	// 需要计算从patch开始的第几行
 	lines := strings.Split(patch, "\n")
 	position := 0
 	currentLine := 0
+	inHeader := true
+
+	log.Printf("📊 计算行 %d 在diff中的位置，diff共有 %d 行", newLine, len(lines))
 
 	for i, line := range lines {
-		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
-			currentLine++
-			if currentLine == newLine {
-				position = i + 1 // GitHub position是1-indexed
-				break
+		if inHeader && strings.HasPrefix(line, "@@") {
+			// 解析diff头部获取起始行号
+			re := regexp.MustCompile(`@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
+			matches := re.FindStringSubmatch(line)
+			if len(matches) >= 2 {
+				start, _ := strconv.Atoi(matches[1])
+				currentLine = start - 1 // GitHub从1开始计数
+				inHeader = false
+				log.Printf("📍 找到diff头部行 %d: %s, 新文件起始行: %d", i, line, start)
 			}
-		} else if !strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
-			currentLine++
+			continue
+		}
+
+		if !inHeader {
+			position++
+
+			if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+				// 这是新增行
+				currentLine++
+				log.Printf("➕ 行 %d (position %d): %s, 当前行号: %d", i, position, line[:min(30, len(line))], currentLine)
+
+				if currentLine == newLine {
+					log.Printf("✅ 找到目标行 %d, 对应position: %d", newLine, position)
+					return position
+				}
+			} else if !strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+				// 上下文行，只有空格前缀
+				if strings.HasPrefix(line, " ") {
+					currentLine++
+					log.Printf("◻️ 行 %d (position %d): %s, 当前行号: %d", i, position, line[:min(30, len(line))], currentLine)
+				}
+			}
 		}
 	}
 
-	return position
+	log.Printf("⚠️ 未找到行 %d 在diff中的对应位置，返回默认值1", newLine)
+	return 1 // 默认返回1，避免为0
 }
 
 // getPRCommitInfo 获取PR的提交信息
@@ -713,7 +792,9 @@ func isAddedLine(diff string, lineNum int) bool {
 	currentLine := 0
 	inHeader := true
 
-	for _, line := range lines {
+	log.Printf("📊 检查行 %d 是否是新增行，diff共有 %d 行", lineNum, len(lines))
+
+	for i, line := range lines {
 		if inHeader && strings.HasPrefix(line, "@@") {
 			re := regexp.MustCompile(`@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 			matches := re.FindStringSubmatch(line)
@@ -721,25 +802,42 @@ func isAddedLine(diff string, lineNum int) bool {
 				start, _ := strconv.Atoi(matches[1])
 				currentLine = start - 1
 				inHeader = false
+				log.Printf("📍 找到diff头部行 %d: %s, 新文件起始行: %d", i, line, start)
 			}
 			continue
 		}
 
 		if !inHeader {
-			if strings.HasPrefix(line, "+") {
+			if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
 				currentLine++
+				log.Printf("➕ 行 %d (diff行 %d): %s, 当前行号: %d", i, currentLine, line[:min(30, len(line))], currentLine)
 				if currentLine == lineNum {
-					return true // 这是一个新增行
+					log.Printf("✅ 行 %d 是新增行", lineNum)
+					return true
 				}
-			} else if !strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "\\") {
+			} else if !strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+				// 上下文行，只有空格前缀
 				if strings.HasPrefix(line, " ") {
 					currentLine++
+					log.Printf("◻️ 行 %d (diff行 %d): %s, 当前行号: %d", i, currentLine, line[:min(30, len(line))], currentLine)
 				}
+			} else {
+				// 删除行或其他
+				log.Printf("➖ 行 %d: %s", i, line[:min(30, len(line))])
 			}
 		}
 	}
 
+	log.Printf("❌ 行 %d 不是新增行", lineNum)
 	return false
+}
+
+// min 辅助函数获取两个整数的最小值
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // 添加辅助函数：根据文件路径判断语言类型
@@ -822,7 +920,19 @@ func isLikelyCode(content string) bool {
 
 func test() {
 	array := [5]int{1, 2, 3, 4, 5}
-	fmt.Println(array[10])
-	fmt.Println("test")
-	fmt.Println("test2")
+
+	// 正确的数组访问
+	fmt.Println("访问有效索引:", array[4])
+
+	// 错误的数组访问 - 会导致运行时错误
+	// 注释掉以避免程序崩溃，但保留以展示问题
+	// fmt.Println(array[10]) // 索引越界: 数组长度为5，有效索引为0-4
+
+	// 安全访问示例
+	index := 10
+	if index < len(array) {
+		fmt.Println(array[index])
+	} else {
+		fmt.Println("索引", index, "超出范围，数组长度为", len(array))
+	}
 }
