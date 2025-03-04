@@ -924,5 +924,13 @@ func test() {
 	// 正确的数组访问
 	fmt.Println("访问有效索引:", array[10])
 	fmt.Println("访问有效索引:", array[12])
+	fmt.Println("访问有效索引:", array[12])
+
+	array := [5]int{1, 2, 3, 4, 5}
+
+	// 正确的数组访问
+	fmt.Println("访问有效索引:", array[10])
+	fmt.Println("访问有效索引:", array[12])
+	fmt.Println("访问有效索引:", array[12])
 
 }
