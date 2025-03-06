@@ -65,14 +65,6 @@ go run main.go
    - Webhook URL: `http://your-server-address:8080/webhook`
    - 事件类型: 选择 "Pull requests"
 
-## 测试模式
-
-设置环境变量`TEST_MODE=true`来启动测试模式：
-
-```bash
-TEST_MODE=true go run main.go
-```
-
 ## 依赖项
 
 - Go 1.17+ 
