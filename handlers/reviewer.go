@@ -89,12 +89,6 @@ ISSUE|927|数组索引越界访问将导致运行时错误|数组array长度为5
 	// 解析AI响应获取评论
 	comments := utils.ParseAIResponseJSON(aiResp, change.Patch)
 
-	// 如果AI未发现问题，尝试使用本地规则检测常见问题
-	if len(comments) == 0 {
-		log.Printf("🔍 AI未发现问题，尝试使用本地规则检测...")
-		comments = utils.DetectCommonIssues(change.Patch)
-	}
-
 	log.Printf("📋 解析得到评论: %+v", comments)
 
 	// 仅校验行号的有效性

@@ -1,14 +1,11 @@
 package utils
 
 import (
-	"fmt"
 	"log"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-
-	"bot-code-review/models"
 )
 
 // ParseLineRanges 解析diff文本获取新文件中的行范围
@@ -199,77 +196,4 @@ func ExtractLineContent(diff string, lineNum int) string {
 	}
 
 	return "[找不到该行代码]"
-}
-
-// DetectCommonIssues 使用本地规则检测常见代码问题
-func DetectCommonIssues(patch string) []models.Comment {
-	var comments []models.Comment
-	lines := strings.Split(patch, "\n")
-
-	log.Printf("🔍 使用本地规则检测常见问题，共 %d 行", len(lines))
-
-	// 记录当前行号
-	currentLine := 0
-	inHeader := true
-
-	for i, line := range lines {
-		if inHeader && strings.HasPrefix(line, "@@") {
-			// 解析diff头部获取起始行号
-			re := regexp.MustCompile(`@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
-			matches := re.FindStringSubmatch(line)
-			if len(matches) >= 2 {
-				start, _ := strconv.Atoi(matches[1])
-				currentLine = start - 1
-				inHeader = false
-				log.Printf("📍 找到diff头部行 %d: %s, 新文件起始行: %d", i, line, start)
-			}
-			continue
-		}
-
-		// 处理新增的代码行
-		if !inHeader && strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
-			currentLine++
-			content := strings.TrimPrefix(line, "+")
-			content = strings.TrimSpace(content)
-
-			log.Printf("🔎 检查行 %d: %s", currentLine, content)
-
-			// 检测数组越界问题 - 寻找array[数字]模式，其中数字大于4
-			// 这里假设array是[5]int类型，有效索引为0-4
-			arrayAccessPattern := regexp.MustCompile(`array\[(\d+)\]`)
-			matches := arrayAccessPattern.FindAllStringSubmatch(content, -1)
-
-			for _, match := range matches {
-				if len(match) >= 2 {
-					index, _ := strconv.Atoi(match[1])
-					if index > 4 { // 假设数组长度为5，有效索引为0-4
-						comment := models.Comment{
-							Line:    currentLine,
-							Content: fmt.Sprintf("问题: 数组索引越界访问将导致运行时错误 | 建议: 数组array长度为5，索引%d超出了有效范围[0:4]，建议使用有效的索引范围或添加边界检查", index),
-						}
-						comments = append(comments, comment)
-						log.Printf("❌ 行 %d 发现数组越界: 索引 %d 超出范围 [0:4]", currentLine, index)
-					}
-				}
-			}
-
-			// 检测变量重复声明问题 - 寻找array := 模式
-			if strings.Contains(content, "array :=") && strings.Contains(content, "[5]int") {
-				comment := models.Comment{
-					Line:    currentLine,
-					Content: "问题: 变量重复声明 | 建议: 变量array已经声明过，不应使用:=重复声明，应使用=进行赋值或使用不同的变量名",
-				}
-				comments = append(comments, comment)
-				log.Printf("❌ 行 %d 发现变量重复声明: %s", currentLine, content)
-			}
-		} else if !inHeader && !strings.HasPrefix(line, "-") {
-			// 处理上下文行
-			if strings.HasPrefix(line, " ") {
-				currentLine++
-			}
-		}
-	}
-
-	log.Printf("🔍 本地规则检测完成，发现 %d 个问题", len(comments))
-	return comments
 }
